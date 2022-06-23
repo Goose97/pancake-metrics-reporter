@@ -1,10 +1,13 @@
 defmodule MetricsCake do
   use GenServer
-  alias MetricsCake.TDigest
+  alias MetricsCake.{BuiltinMetrics, TDigest}
+  require Logger
 
   @summary_metrics [:median, :p95, :p99]
   @summary_buffer_size 1_000
   @summary_retain_window 30 * 60 * 1_000 # 30 mins
+
+  @last_value_measurement_field :value
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -13,14 +16,16 @@ defmodule MetricsCake do
   def init(opts) do
     metrics =
       Keyword.get(opts, :metrics, [])
+      |> Kernel.++(built_in_metrics(opts))
       |> Enum.map(&expand_reporter_options/1)
+      |> Enum.map(&enforce_measurement_on_last_value/1)
 
     :ets.new(:metrics_reporter_utils, [:set, :named_table, :public])
     groups = Enum.group_by(metrics, & &1.event_name)
 
     for {event, metrics} <- groups do
       id = {__MODULE__, event, self()}
-      :telemetry.attach(id, event, &handle_event/4, metrics)
+      :telemetry.attach(id, event, &__MODULE__.handle_event/4, metrics)
       Enum.each(metrics, &init_metric/1)
     end
 
@@ -37,6 +42,12 @@ defmodule MetricsCake do
   end
 
   def report(), do: GenServer.call(__MODULE__, :report)
+
+  def invoke_poller(%Telemetry.Metrics.LastValue{} = metric) do
+    {_interval, func} = metric.reporter_options[:poller]
+    value = func.()
+    :telemetry.execute(metric.event_name, %{@last_value_measurement_field => value})
+  end
 
   def handle_call(:report, _from, %{metrics: metrics} = state) do
     result = Enum.map(metrics, &report_metric/1)
@@ -64,6 +75,7 @@ defmodule MetricsCake do
         case metric do
           %Telemetry.Metrics.Counter{} -> true
           %Telemetry.Metrics.Summary{} -> false
+          %Telemetry.Metrics.LastValue{} -> true
           _ -> false
         end
       end)
@@ -109,6 +121,19 @@ defmodule MetricsCake do
     :timer.send_interval(@summary_retain_window, self(), {:reset_summary, metric})
   end
 
+  defp init_metric(%Telemetry.Metrics.LastValue{} = metric) do
+    #{key, value}
+    true = :ets.insert_new(:metrics_reporter_utils, {ets_key(metric), nil})
+    reporter_options = Map.get(metric, :reporter_options, [])
+    case reporter_options[:poller] do
+      {interval, _func} ->
+        spawn(fn -> __MODULE__.invoke_poller(metric) end)
+        :timer.apply_interval(interval, __MODULE__, :invoke_poller, [metric])
+
+      _ -> :noop
+    end
+  end
+
   defp init_metric(_), do: :noop
 
   defp update_metric(%Telemetry.Metrics.Counter{} = metric, _measurement, _metadata) do
@@ -127,6 +152,13 @@ defmodule MetricsCake do
     else
       :ets.update_element(:metrics_reporter_utils, ets_key(metric), {3, buffer})
     end
+  end
+
+  defp update_metric(%Telemetry.Metrics.LastValue{} = metric, measurement, _metadata) do
+    if !measurement,
+      do: Logger.warn("Telemetry.Metrics.LastValue received a nil measurement. Metric: #{inspect(metric, pretty: true)}")
+
+    :ets.update_element(:metrics_reporter_utils, ets_key(metric), {2, measurement})
   end
 
   defp update_metric(_, _, _), do: :noop
@@ -177,10 +209,19 @@ defmodule MetricsCake do
     }
   end
 
+  defp report_metric(%Telemetry.Metrics.LastValue{} = metric) do
+    [{_, last_value}] = :ets.lookup(:metrics_reporter_utils, ets_key(metric))
+    %{
+      metric: metric,
+      report: %{value: last_value}
+    }
+  end
+
   defp report_metric(metric), do: %{metric: metric, report: nil}
 
   defp ets_key(%Telemetry.Metrics.Counter{name: name}), do: {:counter, name}
   defp ets_key(%Telemetry.Metrics.Summary{name: name}), do: {:summary, name}
+  defp ets_key(%Telemetry.Metrics.LastValue{name: name}), do: {:last_value, name}
 
   defp extract_measurement(metric, measurements, metadata) do
     case metric.measurement do
@@ -195,6 +236,11 @@ defmodule MetricsCake do
 
   defp sample_rate(1), do: fn _ -> true end
   defp sample_rate(rate), do: fn _ -> :rand.uniform() < rate end
+
+  defp built_in_metrics(opts) do
+    built_in_metrics = Keyword.get(opts, :built_in_metrics, [:cpu, :memory, :network])
+    Enum.map(built_in_metrics, &BuiltinMetrics.new/1)
+  end
 
   defp expand_reporter_options(%{reporter_options: options} = metric) do
     if options[:sample_rate] do
@@ -211,4 +257,9 @@ defmodule MetricsCake do
       metric
     end
   end
+
+  defp enforce_measurement_on_last_value(%Telemetry.Metrics.LastValue{} = metric),
+    do: %{metric | measurement: @last_value_measurement_field}
+
+  defp enforce_measurement_on_last_value(metric), do: metric
 end
