@@ -5,7 +5,9 @@ defmodule MetricsCake do
 
   @summary_metrics [:median, :p95, :p99]
   @summary_buffer_size 1_000
-  @summary_retain_window 30 * 60 * 1_000 # 30 mins
+  @summary_retain_window 60 * 60 * 1_000 # 60 mins
+  # Khi reset summary sẽ dễ xảy ra trường hợp metric tăng đột biến, cần warmup summary để tránh hiện tượng này
+  @summary_warmup_window 3 * 60 * 1_000 # 3 mins
 
   @last_value_measurement_field :value
 
@@ -59,8 +61,15 @@ defmodule MetricsCake do
     {:noreply, state}
   end
 
-  def handle_info({:reset_summary, metric}, state) do
-    :ets.update_element(:metrics_reporter_utils, ets_key(metric), [{2, TDigest.new()}, {4, NaiveDateTime.utc_now()}])
+  def handle_info({:next_summary_window, metric}, state) do
+    :ets.update_element(:metrics_reporter_utils, ets_key(metric), [{3, TDigest.new()}, {5, NaiveDateTime.utc_now()}])
+    :timer.send_after(@summary_warmup_window, {:rolling_summary, metric})
+    {:noreply, state}
+  end
+
+  def handle_info({:rolling_summary, metric}, state) do
+    [{_, _, next_t_digest, _, _}] = :ets.lookup(:metrics_reporter_utils, ets_key(metric))
+    :ets.update_element(:metrics_reporter_utils, ets_key(metric), [{2, next_t_digest}, {3, nil}])
     {:noreply, state}
   end
 
@@ -116,9 +125,9 @@ defmodule MetricsCake do
   end
 
   defp init_metric(%Telemetry.Metrics.Summary{} = metric) do
-    # {key, t_digest, buffer, last_reset}
-    true = :ets.insert_new(:metrics_reporter_utils, {ets_key(metric), TDigest.new(), [], nil})
-    :timer.send_interval(@summary_retain_window, self(), {:reset_summary, metric})
+    # {key, t_digest, next_t_digest, buffer, last_reset}
+    true = :ets.insert_new(:metrics_reporter_utils, {ets_key(metric), TDigest.new(), nil, [], nil})
+    :timer.send_interval(@summary_retain_window, self(), {:next_summary_window, metric})
   end
 
   defp init_metric(%Telemetry.Metrics.LastValue{} = metric) do
@@ -144,13 +153,20 @@ defmodule MetricsCake do
   defp update_metric(%Telemetry.Metrics.Summary{} = metric, measurement, _metadata)
     when measurement != nil
   do
-    [{_, t_digest, buffer, _}] = :ets.lookup(:metrics_reporter_utils, ets_key(metric))
+    [{_, t_digest, next_t_digest, buffer, _}] =
+      :ets.lookup(:metrics_reporter_utils, ets_key(metric))
+
     buffer = [measurement | buffer]
     if length(buffer) > @summary_buffer_size do
-      updated = TDigest.update(t_digest, buffer)
-      :ets.update_element(:metrics_reporter_utils, ets_key(metric), [{2, updated}, {3, []}])
+      updated_t_digest = TDigest.update(t_digest, buffer)
+      updated_next_t_digest = if next_t_digest, do: TDigest.update(next_t_digest, buffer)
+      :ets.update_element(
+        :metrics_reporter_utils,
+        ets_key(metric),
+        [{2, updated_t_digest}, {3, updated_next_t_digest}, {4, []}]
+      )
     else
-      :ets.update_element(:metrics_reporter_utils, ets_key(metric), {3, buffer})
+      :ets.update_element(:metrics_reporter_utils, ets_key(metric), {4, buffer})
     end
   end
 
@@ -184,11 +200,16 @@ defmodule MetricsCake do
   end
 
   defp report_metric(%Telemetry.Metrics.Summary{} = metric) do
-    [{_, t_digest, buffer, _}] = :ets.lookup(:metrics_reporter_utils, ets_key(metric))
+    [{_, t_digest, next_t_digest, buffer, _}] = :ets.lookup(:metrics_reporter_utils, ets_key(metric))
 
     # Flush everything in the buffer before report
     t_digest = TDigest.update(t_digest, buffer)
-    :ets.update_element(:metrics_reporter_utils, ets_key(metric), [{2, t_digest}, {3, []}])
+    next_t_digest = if next_t_digest, do: TDigest.update(next_t_digest, buffer)
+    :ets.update_element(
+      :metrics_reporter_utils,
+      ets_key(metric),
+      [{2, t_digest}, {3, next_t_digest}, {4, []}]
+    )
 
     interested_metrics = Keyword.get(metric.reporter_options, :metrics, [])
     report =
