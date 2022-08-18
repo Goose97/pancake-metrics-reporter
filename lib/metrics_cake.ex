@@ -145,9 +145,15 @@ defmodule MetricsCake do
 
   defp init_metric(_), do: :noop
 
-  defp update_metric(%Telemetry.Metrics.Counter{} = metric, _measurement, _metadata) do
+  defp update_metric(%Telemetry.Metrics.Counter{} = metric, measurement, _metadata) do
     [{_, counter, _}] = :ets.lookup(:metrics_reporter_utils, ets_key(metric))
-    :counters.add(counter, 1, 1)
+    count =
+      case measurement do
+        %{__count__: count} -> count
+        _ -> 1
+      end
+
+    :counters.add(counter, 1, count)
   end
 
   defp update_metric(%Telemetry.Metrics.Summary{} = metric, measurement, _metadata)
