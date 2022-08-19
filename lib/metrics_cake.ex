@@ -147,12 +147,7 @@ defmodule MetricsCake do
 
   defp update_metric(%Telemetry.Metrics.Counter{} = metric, measurement, _metadata) do
     [{_, counter, _}] = :ets.lookup(:metrics_reporter_utils, ets_key(metric))
-    count =
-      case measurement do
-        %{__count__: count} -> count
-        _ -> 1
-      end
-
+    count = measurement || 1
     :counters.add(counter, 1, count)
   end
 
@@ -254,7 +249,13 @@ defmodule MetricsCake do
     case metric.measurement do
       fun when is_function(fun, 2) -> fun.(measurements, metadata)
       fun when is_function(fun, 1) -> fun.(measurements)
-      key -> measurements[key]
+      key ->
+        key =
+          if metric.__struct__ == Telemetry.Metrics.Counter and key == nil,
+          do: :__count__,
+          else: key
+
+        measurements[key]
     end
   end
 
