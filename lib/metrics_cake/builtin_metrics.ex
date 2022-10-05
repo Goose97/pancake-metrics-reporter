@@ -21,7 +21,7 @@ defmodule MetricsCake.BuiltinMetrics do
   end
 
   def gather_builtin_metric(:memory) do
-    shell_command = ~c(free -b | sed -n '2 p' | awk '{print $2,$4}')
+    shell_command = ~c(free -b | sed -n '2 p' | awk '{print $2,$3,$4,$6}')
     line =
       :os.cmd(shell_command)
       |> List.to_string()
@@ -29,13 +29,16 @@ defmodule MetricsCake.BuiltinMetrics do
       |> String.split("\n")
       |> List.last()
 
-    Regex.named_captures(~r/(?<total>\d+) (?<free>\d+)/, line)
-    |> Enum.map(fn {key, value} ->
-      %{
-        type: key,
-        value: String.to_integer(value)
-      }
-    end)
+    metrics =
+      Regex.named_captures(~r/(?<total>\d+) (?<used>\d+) (?<free>\d+) (?<cache>\d+)/, line)
+      |> Enum.map(fn {key, value} ->
+        %{
+          type: key,
+          value: String.to_integer(value)
+        }
+      end)
+
+    metrics ++ [%{type: "beam_vm", value: :erlang.memory(:total)}]
   end
 
   def gather_builtin_metric(:network) do
