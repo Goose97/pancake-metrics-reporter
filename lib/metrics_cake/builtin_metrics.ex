@@ -92,4 +92,10 @@ defmodule MetricsCake.BuiltinMetrics do
 
     metrics
   end
+
+  def gather_builtin_metric(:beam) do
+    [
+      %{type: "active_tasks", value: :erlang.statistics(:total_active_tasks_all)}
+    ]
+  end
 end

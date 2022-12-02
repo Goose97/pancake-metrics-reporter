@@ -266,7 +266,7 @@ defmodule MetricsCake do
   defp sample_rate(rate), do: fn _ -> :rand.uniform() < rate end
 
   defp built_in_metrics(opts) do
-    built_in_metrics = Keyword.get(opts, :built_in_metrics, [:cpu, :memory, :network])
+    built_in_metrics = Keyword.get(opts, :built_in_metrics, [:cpu, :memory, :network, :beam])
     Enum.map(built_in_metrics, &BuiltinMetrics.new/1)
   end
 
