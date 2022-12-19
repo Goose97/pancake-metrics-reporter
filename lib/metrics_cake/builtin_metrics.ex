@@ -8,16 +8,30 @@ defmodule MetricsCake.BuiltinMetrics do
   end
 
   def gather_builtin_metric(:cpu) do
-    shell_command = 'top -b -n 5 -d 0.2 | awk /Cpu/'
-    line =
+    shell_command = ~c(top -b -n 5 -d 0.2 | awk '/load/{ LOAD=$0; next } /Cpu/{ print LOAD"\\n"$0}')
+    [load_avg, cpu_utilization] =
       :os.cmd(shell_command)
       |> List.to_string()
       |> String.trim()
       |> String.split("\n")
-      |> List.last()
+      |> Enum.take(-2)
 
-    [idle_perent] = Regex.run(~r/[\d\.]+(?= id)/, line)
-    100 - String.to_float(idle_perent) |> Float.round(2)
+    metrics =
+      Regex.named_captures(~r/load average: (?<min_1>[\d\.]+)[,\s]+(?<min_5>[\d\.]+)[,\s]+(?<min_15>[\d\.]+)/, load_avg)
+      |> Enum.map(fn {key, value} ->
+        %{
+          type: "load_avg",
+          value: String.to_float(value),
+          labels: %{"period" => key}
+        }
+      end)
+
+    [idle_perent] = Regex.run(~r/[\d\.]+(?= id)/, cpu_utilization)
+    metrics_1 = [
+      %{type: "cpu_utilization", value: 100 - String.to_float(idle_perent) |> Float.round(2)}
+    ]
+
+    metrics ++ metrics_1
   end
 
   def gather_builtin_metric(:memory) do
@@ -94,8 +108,24 @@ defmodule MetricsCake.BuiltinMetrics do
   end
 
   def gather_builtin_metric(:beam) do
-    [
+    metrics = [
       %{type: "active_tasks", value: :erlang.statistics(:total_active_tasks_all)}
     ]
+
+    metrics_1 =
+      case :application.get_application(:runtime_tools) do
+        {:ok, :runtime_tools} ->
+          # 1 second
+          result = :scheduler.utilization(1)
+          {_, value, _} = :proplists.lookup(:weighted, result)
+
+          [
+            %{type: "scheduler_utilization", value: value * 100}
+          ]
+
+        :undefined -> []
+      end
+
+    metrics ++ metrics_1
   end
 end
