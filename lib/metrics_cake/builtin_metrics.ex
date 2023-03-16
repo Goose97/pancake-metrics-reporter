@@ -56,55 +56,63 @@ defmodule MetricsCake.BuiltinMetrics do
   end
 
   def gather_builtin_metric(:network) do
-    shell_command = ~c(sudo iftop -tB -s 2 -i eth0 | grep 'Total')
-    lines =
-      :os.cmd(shell_command)
-      |> List.to_string()
-      |> String.trim()
-      |> String.split("\n")
+    interfaces = ["eth0", "eth1"]
 
-    send_rate = Enum.find(lines, & String.contains?(&1, "Total send rate"))
-    receive_rate = Enum.find(lines, & String.contains?(&1, "Total receive rate"))
+    Enum.flat_map(interfaces, fn interface ->
+      shell_command = ~c(sudo iftop -tB -s 2 -i #{interface} | grep 'Total')
+      lines =
+        :os.cmd(shell_command)
+        |> List.to_string()
+        |> String.trim()
+        |> String.split("\n")
 
-    to_number = fn string ->
-      if String.contains?(string, "."),
-        do: String.to_float(string),
-        else: String.to_integer(string)
-    end
+      send_rate = Enum.find(lines, & String.contains?(&1, "Total send rate"))
+      receive_rate = Enum.find(lines, & String.contains?(&1, "Total receive rate"))
 
-    convert_to_byte = fn
-      value, "B" -> value
-      value, "KB" -> value * 1024
-      value, "MB" -> value * 1024 * 1024
-    end
+      if send_rate && receive_rate do
+        to_number = fn string ->
+          if String.contains?(string, "."),
+            do: String.to_float(string),
+            else: String.to_integer(string)
+        end
 
-    regex = ~r/([\d\.]+)(B|KB|MB)/
-    metrics = []
-    metrics =
-      case Regex.run(regex, send_rate) do
-        [_, value, unit] ->
-          metrics ++ [%{
-            direction: "egress",
-            interface: "eth0",
-            value: to_number.(value) |> convert_to_byte.(unit)
-          }]
+        convert_to_byte = fn
+          value, "B" -> value
+          value, "KB" -> value * 1024
+          value, "MB" -> value * 1024 * 1024
+        end
 
-        nil -> metrics
+        regex = ~r/([\d\.]+)(B|KB|MB)/
+        metrics = []
+        metrics =
+          case Regex.run(regex, send_rate) do
+            [_, value, unit] ->
+              metrics ++ [%{
+                direction: "egress",
+                interface: interface,
+                value: to_number.(value) |> convert_to_byte.(unit)
+              }]
+
+            nil -> metrics
+          end
+
+        metrics =
+          case Regex.run(regex, receive_rate) do
+            [_, value, unit] ->
+              metrics ++ [%{
+                direction: "ingress",
+                interface: interface,
+                value: to_number.(value) |> convert_to_byte.(unit)
+              }]
+
+            nil -> metrics
+          end
+
+        metrics
+      else
+        []
       end
-
-    metrics =
-      case Regex.run(regex, receive_rate) do
-        [_, value, unit] ->
-          metrics ++ [%{
-            direction: "ingress",
-            interface: "eth0",
-            value: to_number.(value) |> convert_to_byte.(unit)
-          }]
-
-        nil -> metrics
-      end
-
-    metrics
+    end)
   end
 
   def gather_builtin_metric(:beam) do
